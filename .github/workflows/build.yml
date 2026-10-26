@@ -1,0 +1,969 @@
+name: Build APK
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+      - name: Create project files
+        run: |
+          cat > settings.gradle.kts <<'JARVIS_EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "Jarvis"
+          include(":app")
+          JARVIS_EOF
+          cat > build.gradle.kts <<'JARVIS_EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          JARVIS_EOF
+          cat > gradle.properties <<'JARVIS_EOF'
+          org.gradle.jvmargs=-Xmx3g
+          android.useAndroidX=true
+          JARVIS_EOF
+          mkdir -p app
+          cat > app/build.gradle.kts <<'JARVIS_EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.jarvis.assistant"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.jarvis.assistant"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+              packaging { jniLibs { useLegacyPackaging = true } }
+          }
+          dependencies {
+              implementation("androidx.core:core-ktx:1.13.1")
+              implementation("net.java.dev.jna:jna:5.13.0@aar")
+              implementation("com.alphacephei:vosk-android:0.3.47")
+          }
+          JARVIS_EOF
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'JARVIS_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.RECORD_AUDIO" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.CALL_PHONE" />
+              <uses-permission android:name="android.permission.READ_CONTACTS" />
+              <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+              <uses-permission android:name="android.permission.READ_CALL_LOG" />
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+              <queries>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN" />
+                      <category android:name="android.intent.category.LAUNCHER" />
+                  </intent>
+                  <intent>
+                      <action android:name="android.speech.RecognitionService" />
+                  </intent>
+              </queries>
+
+              <application
+                  android:label="@string/app_name"
+                  android:icon="@android:drawable/sym_def_app_icon"
+                  android:theme="@android:style/Theme.Material.Light">
+
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".ListenService"
+                      android:exported="false"
+                      android:foregroundServiceType="microphone" />
+
+                  <service
+                      android:name=".JarvisAccessibility"
+                      android:exported="true"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_config" />
+                  </service>
+
+                  <service
+                      android:name=".NotifService"
+                      android:exported="true"
+                      android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.service.notification.NotificationListenerService" />
+                      </intent-filter>
+                  </service>
+
+                  <receiver android:name=".CallReceiver" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.PHONE_STATE" />
+                      </intent-filter>
+                  </receiver>
+              </application>
+          </manifest>
+          JARVIS_EOF
+          mkdir -p app/src/main/res/values
+          cat > app/src/main/res/values/strings.xml <<'JARVIS_EOF'
+          <resources>
+              <string name="app_name">Jarvis</string>
+              <string name="acc_desc">फ़ोन लॉक करने और ऐप खोलने के लिए Jarvis को इसकी ज़रूरत है</string>
+          </resources>
+          JARVIS_EOF
+          mkdir -p app/src/main/res/xml
+          cat > app/src/main/res/xml/accessibility_config.xml <<'JARVIS_EOF'
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:accessibilityFlags="flagDefault"
+              android:canRetrieveWindowContent="true"
+              android:description="@string/acc_desc"
+              android:notificationTimeout="100" />
+          JARVIS_EOF
+          mkdir -p app/src/main/java/com/jarvis/assistant
+          cat > app/src/main/java/com/jarvis/assistant/JarvisAccessibility.kt <<'JARVIS_EOF'
+          package com.jarvis.assistant
+
+          import android.accessibilityservice.AccessibilityService
+          import android.content.Intent
+          import android.os.Build
+          import android.view.accessibility.AccessibilityEvent
+          import android.view.accessibility.AccessibilityNodeInfo
+
+          class JarvisAccessibility : AccessibilityService() {
+              override fun onServiceConnected() { instance = this }
+              override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+              override fun onInterrupt() {}
+              override fun onUnbind(intent: Intent?): Boolean { instance = null; return super.onUnbind(intent) }
+
+              fun lock(): Boolean =
+                  if (Build.VERSION.SDK_INT >= 28) performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN) else false
+
+              // सुरक्षा के लिए स्क्रीन सिर्फ़ YouTube की ही पढ़ी जाती है, बाकी किसी ऐप की नहीं
+              private fun collect(): List<Pair<String, AccessibilityNodeInfo>> {
+                  val root = rootInActiveWindow ?: return emptyList()
+                  if (root.packageName?.toString() != "com.google.android.youtube") return emptyList()
+                  val out = ArrayList<Pair<String, AccessibilityNodeInfo>>()
+                  fun walk(n: AccessibilityNodeInfo?) {
+                      if (n == null) return
+                      val d = n.contentDescription?.toString()?.replace("–", "-")
+                      if (!d.isNullOrBlank() && d.length >= 25 && n.isClickable && d.contains(" - ")) {
+                          val title = d.split(" - ").first().trim()
+                          if (title.isNotEmpty() && out.none { it.first == title }) out.add(title to n)
+                      }
+                      for (i in 0 until n.childCount) walk(n.getChild(i))
+                  }
+                  walk(root)
+                  return out
+              }
+
+              fun videoTitles(): List<String> = collect().map { it.first }
+
+              fun clickVideo(index: Int): Boolean {
+                  val list = collect()
+                  if (index !in list.indices) return false
+                  var n: AccessibilityNodeInfo? = list[index].second
+                  while (n != null) {
+                      if (n.isClickable) return n.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                      n = n.parent
+                  }
+                  return false
+              }
+
+              companion object { var instance: JarvisAccessibility? = null }
+          }
+          JARVIS_EOF
+          mkdir -p app/src/main/java/com/jarvis/assistant
+          cat > app/src/main/java/com/jarvis/assistant/CallReceiver.kt <<'JARVIS_EOF'
+          package com.jarvis.assistant
+
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          import android.telephony.TelephonyManager
+
+          class CallReceiver : BroadcastReceiver() {
+              override fun onReceive(c: Context, i: Intent) {
+                  if (i.action != TelephonyManager.ACTION_PHONE_STATE_CHANGED) return
+                  val st = i.getStringExtra(TelephonyManager.EXTRA_STATE)
+                  @Suppress("DEPRECATION")
+                  val num = i.getStringExtra(TelephonyManager.EXTRA_INCOMING_NUMBER)
+                  try {
+                      c.startService(
+                          Intent(c, ListenService::class.java).setAction("call_state")
+                              .putExtra("state", st).putExtra("number", num)
+                      )
+                  } catch (_: Exception) {}
+              }
+          }
+          JARVIS_EOF
+          mkdir -p app/src/main/java/com/jarvis/assistant
+          cat > app/src/main/java/com/jarvis/assistant/Commands.kt <<'JARVIS_EOF'
+          package com.jarvis.assistant
+
+          import android.Manifest
+          import android.content.Context
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.net.Uri
+          import android.os.Bundle
+          import android.provider.ContactsContract
+          import android.telecom.TelecomManager
+          import androidx.core.content.ContextCompat
+          import java.text.Normalizer
+
+          object Commands {
+              private const val DEV_DIGITS = "०१२३४५६७८९"
+
+              private val stopCall = setOf(
+                  "कॉल", "call", "करो", "को", "लगाओ", "फोन", "पर", "जार्विस", "jarvis", "लगा", "कर",
+                  "मिलाओ", "डायल", "करें", "कीजिए", "please", "to"
+              )
+              private val stopOpen = setOf(
+                  "खोलो", "खोल", "open", "ओपन", "चालू", "करो", "चलाओ", "जार्विस", "jarvis", "को",
+                  "ऐप", "app", "एप", "कर", "दो", "please"
+              )
+              private val stopYt = stopOpen + setOf(
+                  "सर्च", "search", "ढूंढो", "ढूंढ", "ढूँढो", "ढूँढ", "पर", "में", "यूट्यूब", "youtube", "on", "for"
+              )
+              private val builtin = mapOf(
+                  "व्हाट्सएप" to "com.whatsapp", "व्हाट्सऐप" to "com.whatsapp", "वॉट्सऐप" to "com.whatsapp",
+                  "whatsapp" to "com.whatsapp", "whats app" to "com.whatsapp",
+                  "यूट्यूब" to "com.google.android.youtube", "youtube" to "com.google.android.youtube",
+                  "इंस्टाग्राम" to "com.instagram.android", "instagram" to "com.instagram.android",
+                  "क्रोम" to "com.android.chrome", "chrome" to "com.android.chrome",
+                  "टेलीग्राम" to "org.telegram.messenger", "telegram" to "org.telegram.messenger",
+                  "जीमेल" to "com.google.android.gm", "gmail" to "com.google.android.gm",
+                  "मैप्स" to "com.google.android.apps.maps", "maps" to "com.google.android.apps.maps"
+              )
+
+              private const val CHAT_SYSTEM =
+                  "तुम Jarvis हो, एक वॉइस असिस्टेंट। जवाब बहुत छोटा रखो (1-2 वाक्य), सादी हिंदी में, " +
+                  "बिना markdown, बिना इमोजी, बिना लिस्ट। यूज़र को 'सर' कहो।"
+              private const val DRAFT_SYSTEM =
+                  "तुम यूज़र की तरफ़ से एक मैसेज का छोटा जवाब लिख रहे हो। सामने वाले की भाषा और लहज़े में, " +
+                  "सिर्फ़ एक छोटा वाक्य। केवल जवाब का टेक्स्ट दो, कोई समझाइश या quotes नहीं।"
+
+              private val history = ArrayList<Pair<String, String>>()
+
+              private fun norm(s: String): String {
+                  val d = Normalizer.normalize(s.lowercase(), Normalizer.Form.NFD)
+                  val sb = StringBuilder()
+                  for (ch in d) {
+                      val i = DEV_DIGITS.indexOf(ch)
+                      if (i >= 0) sb.append(i) else if (ch != '\u093C') sb.append(ch)
+                  }
+                  return sb.toString()
+              }
+
+              private fun has(t: String, vararg k: String) = k.any { t.contains(it) }
+              private fun yes(t: String) = has(t, "हाँ", "हां", "भेज", "yes", "send", "कर दो", "ठीक", "लगाओ", "लगा दो")
+
+              /** true लौटे तो सेशन अभी जारी है (आगे का सवाल/काम चल रहा है) */
+              fun handle(s: ListenService, raw: String): Boolean {
+                  val t = norm(raw)
+                  if (t.isBlank()) return false
+                  return when {
+                      has(t, "लॉक", "lock", "लाक") -> lock(s)
+                      has(t, "जवाब", "रिप्लाई", "reply") -> reply(s)
+                      has(t, "मैसेज पढ", "मैसेज सुना", "message") -> readLast(s)
+                      has(t, "सर्च", "search", "ढूंढ", "ढूँढ") -> ytSearch(s, t)
+                      has(t, "कॉल", "call", "फोन करो", "फोन लगाओ", "डायल") -> call(s, t)
+                      has(t, "खोल", "open", "ओपन", "चालू", "चलाओ") -> open(s, t)
+                      else -> chat(s, raw)
+                  }
+              }
+
+              // ---------- फ़ोन लॉक ----------
+              private fun lock(s: ListenService): Boolean {
+                  if (JarvisAccessibility.instance?.lock() != true) s.say("सर, Accessibility चालू नहीं है")
+                  return false
+              }
+
+              // ---------- बातचीत (Claude) ----------
+              private fun chat(s: ListenService, raw: String): Boolean {
+                  if (!ClaudeApi.hasKey(s)) { s.say("सर, Settings में Claude की key नहीं डाली है"); return false }
+                  history.add("user" to raw)
+                  while (history.size > 8) history.removeAt(0)
+                  ClaudeApi.ask(s, CHAT_SYSTEM, history.toList()) { r, _ ->
+                      if (r != null) {
+                          history.add("assistant" to r)
+                          s.say(r) { s.endSession() }
+                      } else {
+                          if (history.isNotEmpty()) history.removeAt(history.size - 1)
+                          s.say("सर, AI से जवाब नहीं मिला") { s.endSession() }
+                      }
+                  }
+                  return true
+              }
+
+              // ---------- मैसेज पढ़ना और जवाब देना ----------
+              private fun readLast(s: ListenService): Boolean {
+                  val m = NotifService.last
+                  if (m == null) s.say("सर, कोई नया मैसेज नहीं है")
+                  else s.say("${m.sender} का मैसेज: ${m.text}")
+                  return false
+              }
+
+              private fun reply(s: ListenService): Boolean {
+                  val m = NotifService.last
+                  if (m == null || m.action == null) { s.say("सर, जवाब देने लायक कोई मैसेज नहीं है"); return false }
+                  s.ask("क्या जवाब लिखूँ सर? या बोलिए, तुम सोचो") { ans ->
+                      if (ans == null) {
+                          s.endSession()
+                      } else if (has(norm(ans), "सोचो", "खुद", "तुम सोच", "आप सोच")) {
+                          if (!ClaudeApi.hasKey(s)) { s.say("सर, Claude की key नहीं डाली है") { s.endSession() } }
+                          else ClaudeApi.ask(s, DRAFT_SYSTEM, listOf("user" to "${m.sender} ने मैसेज भेजा: ${m.text}")) { r, _ ->
+                              if (r != null) confirmSend(s, m, r.trim())
+                              else s.say("सर, AI से जवाब नहीं मिला") { s.endSession() }
+                          }
+                      } else {
+                          confirmSend(s, m, ans.trim())
+                      }
+                  }
+                  return true
+              }
+
+              private fun confirmSend(s: ListenService, m: NotifService.Msg, draft: String) {
+                  s.ask("लिखा है: $draft. भेज दूँ?") { a ->
+                      if (a != null && yes(norm(a))) {
+                          val ok = NotifService.sendReply(s, m, draft)
+                          s.say(if (ok) "भेज दिया सर" else "सर, भेज नहीं पाया")
+                      } else s.say("ठीक है, नहीं भेजा")
+                      s.endSession()
+                  }
+              }
+
+              // ---------- YouTube सर्च ----------
+              private fun ytSearch(s: ListenService, t: String): Boolean {
+                  val q = t.split(Regex("\\s+")).filter { it.isNotBlank() && it !in stopYt }.joinToString(" ")
+                  if (q.isBlank()) { s.say("क्या सर्च करूँ सर"); return false }
+                  val i = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.youtube.com/results?search_query=" + Uri.encode(q)))
+                      .setPackage("com.google.android.youtube").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                  val ctx: Context = JarvisAccessibility.instance ?: s
+                  try { ctx.startActivity(i) } catch (e: Exception) { s.say("यूट्यूब नहीं खुल पाया"); return false }
+                  s.say("यूट्यूब पर $q खोज रहा हूँ")
+                  s.main.postDelayed({ readResults(s, 0) }, 5000)
+                  return true
+              }
+
+              private fun readResults(s: ListenService, attempt: Int) {
+                  val titles = JarvisAccessibility.instance?.videoTitles() ?: emptyList()
+                  if (titles.isEmpty()) {
+                      if (attempt < 2) s.main.postDelayed({ readResults(s, attempt + 1) }, 2500)
+                      else s.say("सर, नतीजे पढ़ नहीं पाया") { s.endSession() }
+                      return
+                  }
+                  val top = titles.take(4)
+                  val speech = top.mapIndexed { i, x -> "${i + 1}. $x" }.joinToString(". ")
+                  s.ask("$speech. कौन सा चलाऊँ?") { ans ->
+                      val idx = ans?.let { pickIndex(norm(it)) }
+                      if (idx != null && idx < top.size) {
+                          if (JarvisAccessibility.instance?.clickVideo(idx) != true) s.say("सर, वीडियो नहीं चला पाया")
+                      }
+                      s.endSession()
+                  }
+              }
+
+              private fun pickIndex(t: String): Int? = when {
+                  has(t, "पहला", "पहले", "first", "1", "एक") -> 0
+                  has(t, "दूसरा", "दूसरे", "second", "2", "दो") -> 1
+                  has(t, "तीसरा", "तीसरे", "third", "3", "तीन") -> 2
+                  has(t, "चौथा", "चौथे", "fourth", "4", "चार") -> 3
+                  else -> null
+              }
+
+              // ---------- कॉल ----------
+              private fun granted(c: Context, p: String) =
+                  ContextCompat.checkSelfPermission(c, p) == PackageManager.PERMISSION_GRANTED
+
+              private fun call(s: ListenService, t: String): Boolean {
+                  val digits = t.filter { it.isDigit() }
+                  if (digits.length >= 7) return dial(s, digits, digits.toCharArray().joinToString(" "))
+                  val name = t.split(Regex("\\s+")).filter { it.isNotBlank() && it !in stopCall }.joinToString(" ")
+                  if (name.isBlank()) { s.say("किसे कॉल करना है सर"); return false }
+                  if (!granted(s, Manifest.permission.READ_CONTACTS)) { s.say("कॉन्टैक्ट की अनुमति नहीं है"); return false }
+                  val found = LinkedHashMap<String, String>()
+                  s.contentResolver.query(
+                      ContactsContract.CommonDataKinds.Phone.CONTENT_URI, arrayOf(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME, ContactsContract.CommonDataKinds.Phone.NUMBER),
+                      "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ?", arrayOf("%$name%"), null
+                  )?.use { while (it.moveToNext()) found.putIfAbsent(it.getString(0), it.getString(1)) }
+                  if (found.isEmpty()) { s.say("$name नाम कॉन्टैक्ट में नहीं मिला"); return false }
+                  val pick = found.entries.firstOrNull { it.key.equals(name, true) }
+                      ?: if (found.size == 1) found.entries.first() else null
+                  if (pick == null) {
+                      s.say("कई नाम मिले: " + found.keys.take(3).joinToString(", ") + ". पूरा नाम बोलिए")
+                      return false
+                  }
+                  return dial(s, pick.value, pick.key)
+              }
+
+              private fun dial(s: ListenService, number: String, spoken: String): Boolean {
+                  if (!granted(s, Manifest.permission.CALL_PHONE)) { s.say("कॉल की अनुमति नहीं है"); return false }
+                  val confirm = s.getSharedPreferences("jarvis", Context.MODE_PRIVATE).getBoolean("confirm_call", true)
+                  if (confirm) {
+                      s.ask("$spoken को कॉल लगाऊँ?") { a ->
+                          if (a != null && yes(norm(a))) place(s, number) else s.say("ठीक है, कॉल नहीं की")
+                          s.endSession()
+                      }
+                      return true
+                  }
+                  s.say("$spoken को कॉल लगा रहा हूँ") { place(s, number) }
+                  return false
+              }
+
+              private fun place(s: ListenService, number: String) {
+                  try {
+                      s.getSystemService(TelecomManager::class.java)
+                          .placeCall(Uri.fromParts("tel", number, null), Bundle())
+                  } catch (e: SecurityException) { s.say("सर, कॉल नहीं लग पाई") }
+              }
+
+              // ---------- ऐप खोलना ----------
+              private fun open(s: ListenService, t: String): Boolean {
+                  val name = t.split(Regex("\\s+")).filter { it.isNotBlank() && it !in stopOpen }.joinToString(" ")
+                  if (name.isBlank()) { s.say("कौन सा ऐप खोलूँ सर"); return false }
+                  val pkg = resolve(s, name)
+                  val intent = pkg?.let { s.packageManager.getLaunchIntentForPackage(it) }
+                  if (intent == null) { s.say("$name ऐप नहीं मिला"); return false }
+                  intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                  val ctx: Context = JarvisAccessibility.instance ?: s
+                  try { ctx.startActivity(intent) } catch (e: Exception) { s.say("ऐप नहीं खुल पाया") }
+                  return false
+              }
+
+              private fun resolve(c: Context, name: String): String? {
+                  val prefs = c.getSharedPreferences("jarvis", Context.MODE_PRIVATE)
+                  for (e in prefs.getStringSet("aliases", emptySet()) ?: emptySet()) {
+                      val parts = e.split("|")
+                      if (parts.size == 2 && parts[0].isNotEmpty() && name.contains(parts[0])) return parts[1]
+                  }
+                  builtin.entries.firstOrNull { name.contains(it.key) }?.let { return it.value }
+                  return findByLabel(c, name)
+              }
+
+              fun findByLabel(c: Context, name: String): String? {
+                  val n = name.trim().lowercase()
+                  if (n.isEmpty()) return null
+                  val pm = c.packageManager
+                  val apps = pm.queryIntentActivities(
+                      Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0
+                  )
+                  val labeled = apps.map { it.loadLabel(pm).toString().lowercase() to it.activityInfo.packageName }
+                  return labeled.firstOrNull { it.first == n }?.second
+                      ?: labeled.firstOrNull { it.first.contains(n) || n.contains(it.first) }?.second
+              }
+
+              fun addAlias(c: Context, alias: String, appName: String): Boolean {
+                  val pkg = findByLabel(c, appName) ?: return false
+                  val prefs = c.getSharedPreferences("jarvis", Context.MODE_PRIVATE)
+                  val set = HashSet(prefs.getStringSet("aliases", emptySet()) ?: emptySet())
+                  set.add("${norm(alias).trim()}|$pkg")
+                  prefs.edit().putStringSet("aliases", set).apply()
+                  return true
+              }
+          }
+          JARVIS_EOF
+          mkdir -p app/src/main/java/com/jarvis/assistant
+          cat > app/src/main/java/com/jarvis/assistant/ListenService.kt <<'JARVIS_EOF'
+          package com.jarvis.assistant
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.Service
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.IBinder
+          import android.os.Looper
+          import android.provider.ContactsContract
+          import android.speech.RecognizerIntent
+          import android.speech.SpeechRecognizer
+          import android.speech.tts.TextToSpeech
+          import android.speech.tts.UtteranceProgressListener
+          import android.telephony.TelephonyManager
+          import org.vosk.Model
+          import org.vosk.Recognizer
+          import org.vosk.android.RecognitionListener
+          import org.vosk.android.SpeechService
+          import org.vosk.android.StorageService
+          import java.util.Locale
+
+          class ListenService : Service(), RecognitionListener {
+              private var model: Model? = null
+              private var speech: SpeechService? = null
+              private var tts: TextToSpeech? = null
+              private var ttsReady = false
+              val main = Handler(Looper.getMainLooper())
+              private val callbacks = HashMap<String, () -> Unit>()
+              private var busy = false
+              private var sr: SpeechRecognizer? = null
+              private var ringing = false
+              private var announced = false
+
+              companion object { var instance: ListenService? = null }
+
+              override fun onBind(i: Intent?): IBinder? = null
+
+              override fun onCreate() {
+                  super.onCreate()
+                  instance = this
+                  val nm = getSystemService(NotificationManager::class.java)
+                  nm.createNotificationChannel(NotificationChannel("jarvis", "Jarvis", NotificationManager.IMPORTANCE_LOW))
+                  val n = Notification.Builder(this, "jarvis")
+                      .setContentTitle("Jarvis सुन रहा है")
+                      .setContentText("\"Jarvis\" बोलिए")
+                      .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+                      .setOngoing(true).build()
+                  if (Build.VERSION.SDK_INT >= 30)
+                      startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+                  else startForeground(1, n)
+
+                  tts = TextToSpeech(this) { st ->
+                      if (st == TextToSpeech.SUCCESS) {
+                          tts?.language = Locale("hi", "IN")
+                          ttsReady = true
+                      }
+                  }
+                  tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                      override fun onStart(id: String?) {}
+                      override fun onDone(id: String?) { main.post { callbacks.remove(id)?.invoke() } }
+                      @Deprecated("deprecated")
+                      override fun onError(id: String?) { main.post { callbacks.remove(id)?.invoke() } }
+                  })
+
+                  StorageService.unpack(this, "model", "model",
+                      { m -> model = m; startWake() },
+                      { _ -> say("सर, आवाज़ का मॉडल लोड नहीं हुआ") })
+              }
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  if (intent?.action == "call_state") handleCallState(
+                      intent.getStringExtra("state"), intent.getStringExtra("number")
+                  )
+                  return START_STICKY
+              }
+
+              override fun onDestroy() {
+                  instance = null
+                  stopWake()
+                  sr?.destroy()
+                  tts?.shutdown()
+                  model?.close()
+                  super.onDestroy()
+              }
+
+              fun say(text: String, then: (() -> Unit)? = null) {
+                  if (!ttsReady) { then?.invoke(); return }
+                  val id = System.nanoTime().toString()
+                  if (then != null) callbacks[id] = then
+                  tts?.speak(text, TextToSpeech.QUEUE_ADD, null, id)
+              }
+
+              /** बोलकर सवाल पूछो, फिर जवाब सुनो */
+              fun ask(prompt: String, onText: (String?) -> Unit) {
+                  say(prompt) { listenOnce(onText) }
+              }
+
+              fun endSession() {
+                  busy = false
+                  startWake()
+              }
+
+              // ---------- जागने वाला शब्द ----------
+              private fun startWake() {
+                  val m = model ?: return
+                  if (speech != null || busy) return
+                  try {
+                      val rec = Recognizer(m, 16000f, "[\"jarvis\", \"[unk]\"]")
+                      speech = SpeechService(rec, 16000f).also { it.startListening(this) }
+                  } catch (e: Exception) { speech = null }
+              }
+
+              private fun stopWake() {
+                  speech?.stop()
+                  speech?.shutdown()
+                  speech = null
+              }
+
+              private fun checkWake(h: String?) {
+                  if (h != null && h.contains("jarvis") && !busy) onWake()
+              }
+
+              override fun onPartialResult(h: String?) = checkWake(h)
+              override fun onResult(h: String?) = checkWake(h)
+              override fun onFinalResult(h: String?) {}
+              override fun onError(e: Exception?) {}
+              override fun onTimeout() {}
+
+              private fun onWake() {
+                  busy = true
+                  stopWake()
+                  say("हाँ सर, बोलिए") {
+                      listenOnce { text ->
+                          if (text == null || !Commands.handle(this, text)) endSession()
+                      }
+                  }
+              }
+
+              // ---------- एक बार सुनना (हिंदी) ----------
+              private fun listenOnce(cb: (String?) -> Unit) {
+                  if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+                      say("आवाज़ पहचान उपलब्ध नहीं है"); cb(null); return
+                  }
+                  val r = SpeechRecognizer.createSpeechRecognizer(this)
+                  sr = r
+                  var finished = false
+                  fun finish(text: String?) {
+                      if (finished) return
+                      finished = true
+                      r.destroy()
+                      if (sr === r) sr = null
+                      cb(text)
+                  }
+                  r.setRecognitionListener(object : android.speech.RecognitionListener {
+                      override fun onReadyForSpeech(p: Bundle?) {}
+                      override fun onBeginningOfSpeech() {}
+                      override fun onRmsChanged(v: Float) {}
+                      override fun onBufferReceived(b: ByteArray?) {}
+                      override fun onEndOfSpeech() {}
+                      override fun onError(e: Int) { finish(null) }
+                      override fun onResults(res: Bundle?) {
+                          finish(res?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull())
+                      }
+                      override fun onPartialResults(p: Bundle?) {}
+                      override fun onEvent(t: Int, p: Bundle?) {}
+                  })
+                  val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                      .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                      .putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hi-IN")
+                      .putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+                  r.startListening(i)
+                  main.postDelayed({ finish(null) }, 12000)
+              }
+
+              // ---------- कॉल आने पर नाम बताना ----------
+              private fun handleCallState(state: String?, number: String?) {
+                  when (state) {
+                      TelephonyManager.EXTRA_STATE_RINGING -> {
+                          if (!ringing) {
+                              ringing = true; announced = false
+                              main.postDelayed({
+                                  if (ringing && !announced) { announced = true; say("सर, किसी अननोन नंबर से फ़ोन आ रहा है") }
+                              }, 2500)
+                          }
+                          if (!number.isNullOrBlank() && !announced) {
+                              announced = true
+                              val name = lookupName(number)
+                              say(if (name != null) "सर, $name का फ़ोन आ रहा है" else "सर, किसी अननोन नंबर से फ़ोन आ रहा है")
+                          }
+                      }
+                      else -> { ringing = false; announced = false }
+                  }
+              }
+
+              private fun lookupName(number: String): String? = try {
+                  val uri = Uri.withAppendedPath(ContactsContract.PhoneLookup.CONTENT_FILTER_URI, Uri.encode(number))
+                  contentResolver.query(uri, arrayOf(ContactsContract.PhoneLookup.DISPLAY_NAME), null, null, null)
+                      ?.use { if (it.moveToFirst()) it.getString(0) else null }
+              } catch (e: Exception) { null }
+          }
+          JARVIS_EOF
+          mkdir -p app/src/main/java/com/jarvis/assistant
+          cat > app/src/main/java/com/jarvis/assistant/MainActivity.kt <<'JARVIS_EOF'
+          package com.jarvis.assistant
+
+          import android.Manifest
+          import android.app.Activity
+          import android.content.Context
+          import android.content.Intent
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.text.InputType
+          import android.view.ViewGroup
+          import android.widget.Button
+          import android.widget.CheckBox
+          import android.widget.EditText
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.TextView
+          import android.widget.Toast
+
+          class MainActivity : Activity() {
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  val prefs = getSharedPreferences("jarvis", Context.MODE_PRIVATE)
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(40, 40, 40, 40)
+                  }
+                  fun label(t: String) = TextView(this).apply { text = t; textSize = 15f; setPadding(0, 24, 0, 8); root.addView(this) }
+                  fun btn(t: String, f: () -> Unit) = Button(this).apply {
+                      text = t; setOnClickListener { f() }
+                      root.addView(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                  }
+
+                  label("Jarvis — ऊपर से नीचे क्रम में बटन दबाएँ")
+                  btn("1. अनुमतियाँ दो") {
+                      val p = mutableListOf(
+                          Manifest.permission.RECORD_AUDIO, Manifest.permission.CALL_PHONE,
+                          Manifest.permission.READ_CONTACTS, Manifest.permission.READ_PHONE_STATE,
+                          Manifest.permission.READ_CALL_LOG
+                      )
+                      if (Build.VERSION.SDK_INT >= 33) p.add(Manifest.permission.POST_NOTIFICATIONS)
+                      requestPermissions(p.toTypedArray(), 1)
+                  }
+                  btn("2. Accessibility चालू करो (लॉक, ऐप खोलना, YouTube)") {
+                      startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                  }
+                  btn("3. Notification access चालू करो (मैसेज पढ़ने/जवाब के लिए)") {
+                      startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                  }
+                  btn("4. Display over other apps की अनुमति") {
+                      startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+                  }
+                  btn("5. Battery: No restriction") {
+                      startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+                  }
+
+                  label("Claude (बातचीत और जवाब लिखने के लिए)")
+                  val key = EditText(this).apply {
+                      hint = "Claude API key यहाँ पेस्ट करें"
+                      inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                      setText(prefs.getString("api_key", ""))
+                      root.addView(this)
+                  }
+                  val model = EditText(this).apply {
+                      hint = "मॉडल का नाम (खाली छोड़ें तो claude-haiku-5-5)"
+                      setText(prefs.getString("model", ""))
+                      root.addView(this)
+                  }
+                  btn("Key सेव करो") {
+                      prefs.edit().putString("api_key", key.text.toString().trim())
+                          .putString("model", model.text.toString().trim()).apply()
+                      Toast.makeText(this, "सेव हो गया", Toast.LENGTH_SHORT).show()
+                  }
+
+                  label("किन ऐप के मैसेज पढ़कर सुनाने हैं")
+                  val groups = listOf(
+                      "WhatsApp" to listOf("com.whatsapp", "com.whatsapp.w4b"),
+                      "Telegram" to listOf("org.telegram.messenger"),
+                      "SMS (Google Messages)" to listOf("com.google.android.apps.messaging")
+                  )
+                  val current = prefs.getStringSet("notif_pkgs", NotifService.DEFAULT_PKGS) ?: NotifService.DEFAULT_PKGS
+                  val boxes = groups.map { (name, pkgs) ->
+                      CheckBox(this).apply { text = name; isChecked = pkgs.first() in current; root.addView(this) }
+                  }
+                  fun saveGroups() {
+                      val set = HashSet<String>()
+                      groups.forEachIndexed { i, g -> if (boxes[i].isChecked) set.addAll(g.second) }
+                      prefs.edit().putStringSet("notif_pkgs", set).apply()
+                  }
+                  boxes.forEach { it.setOnCheckedChangeListener { _, _ -> saveGroups() } }
+
+                  CheckBox(this).apply {
+                      text = "कॉल लगाने से पहले \"लगाऊँ?\" पूछो"
+                      isChecked = prefs.getBoolean("confirm_call", true)
+                      setOnCheckedChangeListener { _, c -> prefs.edit().putBoolean("confirm_call", c).apply() }
+                      root.addView(this)
+                  }
+
+                  label("ऐप का अपना नाम जोड़ें")
+                  val alias = EditText(this).apply { hint = "दूसरा नाम (जैसे: टीवी)"; root.addView(this) }
+                  val app = EditText(this).apply { hint = "असली ऐप का नाम (जैसे: YouTube)"; root.addView(this) }
+                  btn("नाम जोड़ो") {
+                      val ok = Commands.addAlias(this, alias.text.toString(), app.text.toString())
+                      Toast.makeText(this, if (ok) "जुड़ गया" else "ऐप नहीं मिला", Toast.LENGTH_SHORT).show()
+                  }
+
+                  label("चालू / बंद")
+                  btn("6. Jarvis चालू करो") { startForegroundService(Intent(this, ListenService::class.java)) }
+                  btn("Jarvis बंद करो") { stopService(Intent(this, ListenService::class.java)) }
+
+                  setContentView(ScrollView(this).apply { addView(root) })
+              }
+          }
+          JARVIS_EOF
+          mkdir -p app/src/main/java/com/jarvis/assistant
+          cat > app/src/main/java/com/jarvis/assistant/ClaudeApi.kt <<'JARVIS_EOF'
+          package com.jarvis.assistant
+
+          import android.content.Context
+          import android.os.Handler
+          import android.os.Looper
+          import org.json.JSONArray
+          import org.json.JSONObject
+          import java.net.HttpURLConnection
+          import java.net.URL
+
+          object ClaudeApi {
+              private val main = Handler(Looper.getMainLooper())
+
+              fun hasKey(c: Context) =
+                  !c.getSharedPreferences("jarvis", Context.MODE_PRIVATE).getString("api_key", "").isNullOrBlank()
+
+              /** messages: list of (role, content). Callback main thread पर आता है: (जवाब, गलती) */
+              fun ask(c: Context, system: String, messages: List<Pair<String, String>>, cb: (String?, String?) -> Unit) {
+                  val prefs = c.getSharedPreferences("jarvis", Context.MODE_PRIVATE)
+                  val key = prefs.getString("api_key", "")?.trim().orEmpty()
+                  val model = prefs.getString("model", "")?.trim().takeUnless { it.isNullOrEmpty() } ?: "claude-haiku-5-5"
+                  if (key.isEmpty()) { cb(null, "key नहीं है"); return }
+                  Thread {
+                      var result: String? = null
+                      var error: String? = null
+                      try {
+                          val arr = JSONArray()
+                          for ((r, t) in messages) arr.put(JSONObject().put("role", r).put("content", t))
+                          val body = JSONObject().put("model", model).put("max_tokens", 300)
+                              .put("system", system).put("messages", arr)
+                          val con = URL("https://api.anthropic.com/v1/messages").openConnection() as HttpURLConnection
+                          con.requestMethod = "POST"
+                          con.connectTimeout = 15000
+                          con.readTimeout = 40000
+                          con.doOutput = true
+                          con.setRequestProperty("content-type", "application/json")
+                          con.setRequestProperty("x-api-key", key)
+                          con.setRequestProperty("anthropic-version", "2023-06-01")
+                          con.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+                          val code = con.responseCode
+                          val stream = if (code in 200..299) con.inputStream else con.errorStream
+                          val text = stream?.bufferedReader()?.use { it.readText() } ?: ""
+                          if (code in 200..299) {
+                              val content = JSONObject(text).getJSONArray("content")
+                              val sb = StringBuilder()
+                              for (i in 0 until content.length()) {
+                                  val o = content.getJSONObject(i)
+                                  if (o.optString("type") == "text") sb.append(o.optString("text"))
+                              }
+                              result = sb.toString().trim()
+                          } else error = "HTTP $code"
+                      } catch (e: Exception) { error = e.message ?: "error" }
+                      main.post { cb(result, error) }
+                  }.start()
+              }
+          }
+          JARVIS_EOF
+          mkdir -p app/src/main/java/com/jarvis/assistant
+          cat > app/src/main/java/com/jarvis/assistant/NotifService.kt <<'JARVIS_EOF'
+          package com.jarvis.assistant
+
+          import android.app.Notification
+          import android.app.RemoteInput
+          import android.content.Context
+          import android.content.Intent
+          import android.os.Bundle
+          import android.service.notification.NotificationListenerService
+          import android.service.notification.StatusBarNotification
+
+          class NotifService : NotificationListenerService() {
+
+              class Msg(val sender: String, val text: String, val action: Notification.Action?)
+
+              companion object {
+                  var last: Msg? = null
+                  val DEFAULT_PKGS = setOf(
+                      "com.whatsapp", "com.whatsapp.w4b", "org.telegram.messenger",
+                      "com.google.android.apps.messaging"
+                  )
+
+                  fun sendReply(ctx: Context, m: Msg, text: String): Boolean {
+                      val a = m.action ?: return false
+                      val ri = a.remoteInputs ?: return false
+                      return try {
+                          val intent = Intent()
+                          val b = Bundle()
+                          for (r in ri) b.putCharSequence(r.resultKey, text)
+                          RemoteInput.addResultsToIntent(ri, intent, b)
+                          a.actionIntent.send(ctx, 0, intent)
+                          true
+                      } catch (e: Exception) { false }
+                  }
+              }
+
+              private var lastKey = ""
+              private var lastTime = 0L
+
+              override fun onNotificationPosted(sbn: StatusBarNotification) {
+                  val prefs = getSharedPreferences("jarvis", Context.MODE_PRIVATE)
+                  val pkgs = prefs.getStringSet("notif_pkgs", DEFAULT_PKGS) ?: DEFAULT_PKGS
+                  if (sbn.packageName !in pkgs) return
+                  val n = sbn.notification
+                  if (n.flags and Notification.FLAG_GROUP_SUMMARY != 0) return
+                  val e = n.extras
+                  val title = e.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: return
+                  val text = e.getCharSequence(Notification.EXTRA_TEXT)?.toString()?.take(200)
+
+                  val now = System.currentTimeMillis()
+                  if (n.category == Notification.CATEGORY_CALL) {
+                      if (dup("call$title", now)) return
+                      ListenService.instance?.say("सर, $title का कॉल आ रहा है")
+                      return
+                  }
+                  if (text.isNullOrBlank()) return
+                  val action = n.actions?.firstOrNull { it.remoteInputs?.isNotEmpty() == true } ?: return
+                  if (dup(title + text, now)) return
+                  last = Msg(title, text, action)
+                  ListenService.instance?.say("$title का मैसेज आया है: $text")
+              }
+
+              private fun dup(key: String, now: Long): Boolean {
+                  if (key == lastKey && now - lastTime < 4000) return true
+                  lastKey = key; lastTime = now
+                  return false
+              }
+          }
+          JARVIS_EOF
+      - name: Download Vosk model
+        run: |
+          curl -L -o m.zip https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
+          unzip -q m.zip
+          mkdir -p app/src/main/assets
+          rm -rf app/src/main/assets/model
+          mv vosk-model-small-en-us-0.15 app/src/main/assets/model
+          uuidgen > app/src/main/assets/model/uuid
+      - name: Build
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Jarvis-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
